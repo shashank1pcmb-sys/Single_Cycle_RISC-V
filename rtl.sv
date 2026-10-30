@@ -1,54 +1,84 @@
 `timescale 1ns / 1ps
 
-module ex_stage (
-    input  logic [31:0] rs1_data,
-    input  logic [31:0] rs2_data,
-    input  logic [31:0] imm_out,
-    input  logic [31:0] address,       // current PC
-    input  logic        branch,
-    input  logic        alu_src,       // 0 = rs2_data, 1 = imm_out
-    input  logic        fn7_5,
-    input  logic        mux_inp,       // 1 = JALR
-    input  logic [2:0]  fn3,
-    input  logic [6:0]  imm11_5,
-    input  logic [2:0]  aluop,
-    input  logic [6:0]  opcode,
-    output logic        and_out_ex,    // branch / jump taken
-    output logic [31:0] alu_out,
-    output logic [31:0] pc_ex_out      // branch / jump target
+module id_stage(
+    input  logic        clk,
+    input  logic        reset,
+    input  logic        stall,
+    input  logic [31:0] instruction,
+    input  logic [31:0] wb_data,        // data to write back (from the WB stage)
+    output logic [31:0] rs1_data,
+    output logic [31:0] rs2_data,
+    output logic [31:0] imm_out,
+    output logic [6:0]  opcode_out_d,
+    output logic [6:0]  imm11_5,
+    output logic [2:0]  fn3_out_d,
+    output logic        fn7_5,
+    output logic [2:0]  aluop,
+    output logic [1:0]  memtoreg,
+    output logic        branch,
+    output logic        mem_write,
+    output logic        mem_read,
+    output logic        alu_src,
+    output logic        mux_inp
 );
 
-    logic [4:0]  alu_control_sig;
-    logic [31:0] operand_b;
-    logic        zero;
-    logic [31:0] pc_signed_offset;
+    logic [4:0]  rs1_wire, rs2_wire, rd_wire;
+    logic [11:0] imm_wire;
+    logic [19:0] imm_uj_wire;
+    logic        raw_reg_write;
+    logic        gated_reg_write;
 
-    // ALU operand B mux
-    assign operand_b = alu_src ? imm_out : rs2_data;
-
-    // ALU Control instance
-    alu_control u_alu_control (
-        .alu_op      (aluop),
-        .fn3         (fn3),
+    // 1. Decoder
+    decoder u_decoder (
+        .instruction (instruction),
+        .rs1         (rs1_wire),
+        .rs2         (rs2_wire),
+        .rd          (rd_wire),
+        .opcode      (opcode_out_d),
         .imm11_5     (imm11_5),
-        .fn7_5       (fn7_5),
-        .control_out (alu_control_sig)
+        .fn3         (fn3_out_d),
+        .imm         (imm_wire),
+        .imm_uj      (imm_uj_wire),
+        .fn7_5       (fn7_5)
     );
 
-    // ALU instance
-    alu #(.DATA_WIDTH(32)) u_alu (
-        .alu_control (alu_control_sig),
-        .rs1_data    (rs1_data),
-        .rs2_data    (operand_b),
-        .alu_out     (alu_out),
-        .zero        (zero)
+    // 2. Immediate Generator
+    imm_generator u_imm_gen (
+        .imm_input    (imm_wire),
+        .fn3          (fn3_out_d),
+        .opcode       (opcode_out_d),
+        .imm_input_uj (imm_uj_wire),
+        .imm_output   (imm_out)
     );
 
-    // PC target calculation
-    assign pc_signed_offset = address + imm_out;
-    assign pc_ex_out = mux_inp ? {alu_out[31:1], 1'b0} : pc_signed_offset;
+    // 3. Main Control
+    main_control u_main_ctrl (
+        .opcode    (opcode_out_d),
+        .fn3       (fn3_out_d),
+        .memtoreg  (memtoreg),
+        .branch    (branch),
+        .mux_inp   (mux_inp),
+        .memread   (mem_read),
+        .memwrite  (mem_write),
+        .alusrc    (alu_src),
+        .reg_write (raw_reg_write),
+        .aluop     (aluop)
+    );
 
-    // Branch / jump taken logic
-    assign and_out_ex = (branch && zero) || (opcode == 7'h6F) || (opcode == 7'h67);
+    // Register write enable is gated: reg_write && !stall
+    assign gated_reg_write = raw_reg_write && (!stall);
+
+    // 4. Register File
+    register_file u_reg_file (
+        .rs1_sel   (rs1_wire),
+        .rs2_sel   (rs2_wire),
+        .reg_write (gated_reg_write),
+        .clk       (clk),
+        .reset     (reset),
+        .wb_data   (wb_data),
+        .rd_sel    (rd_wire),
+        .rs1_data  (rs1_data),
+        .rs2_data  (rs2_data)
+    );
 
 endmodule
